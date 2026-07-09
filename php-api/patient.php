@@ -24,8 +24,32 @@ $input = json_decode(file_get_contents('php://input'), true);
 // GET ALL PATIENTS
 // ============================================
 if ($action === 'list' && $method === 'GET') {
-    validateAuth();
+    $auth = validateAuth();
+    $callerRole = $auth['role'] ?? null;
+
+    if (!in_array($callerRole, ['admin', 'doctor'])) {
+        // Non-admin/doctors only list their own patients
+        $query = "SELECT * FROM patients WHERE user_id = ? ORDER BY created_at DESC";
+        $stmt = $conn->prepare($query);
+        $stmt->bind_param('i', $auth['user_id']);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        if (!$result) {
+            sendError('Database error: ' . $conn->error, 500);
+        }
+
+        $patients = [];
+        while ($row = $result->fetch_assoc()) {
+            $row['allergies'] = json_decode($row['allergies'] ?? '[]');
+            $row['chronic_conditions'] = json_decode($row['chronic_conditions'] ?? '[]');
+            $patients[] = $row;
+        }
+
+        sendSuccess($patients, 'Patients retrieved');
+    }
     
+    // admin/doctor: fetch all patients
     $query = "SELECT * FROM patients ORDER BY created_at DESC";
     $result = $conn->query($query);
     
@@ -48,7 +72,7 @@ if ($action === 'list' && $method === 'GET') {
 // GET PATIENT BY ID
 // ============================================
 else if ($action === 'get' && $method === 'GET') {
-    validateAuth();
+    $auth = validateAuth();
     $patient_id = $_GET['id'] ?? null;
     
     if (!$patient_id) {
@@ -68,6 +92,13 @@ else if ($action === 'get' && $method === 'GET') {
     $patient = $result->fetch_assoc();
     $patient['allergies'] = json_decode($patient['allergies'] ?? '[]');
     $patient['chronic_conditions'] = json_decode($patient['chronic_conditions'] ?? '[]');
+
+    // Authorization: patients can only fetch their own record unless admin/doctor
+    $callerRole = $auth['role'] ?? null;
+    $callerId = $auth['user_id'] ?? null;
+    if (!in_array($callerRole, ['admin', 'doctor']) && $patient['user_id'] != $callerId) {
+        sendError('Forbidden', 403);
+    }
     
     sendSuccess($patient);
 }
@@ -76,9 +107,17 @@ else if ($action === 'get' && $method === 'GET') {
 // CREATE PATIENT
 // ============================================
 else if ($action === 'create' && $method === 'POST') {
-    validateAuth();
-    
-    $user_id = $input['user_id'] ?? null;
+    $auth = validateAuth();
+    $callerUserId = $auth['user_id'] ?? null;
+    $callerRole = $auth['role'] ?? null;
+
+    // Admin may create for another user by supplying user_id
+    if (isset($input['user_id']) && $callerRole === 'admin') {
+        $user_id = (int)$input['user_id'];
+    } else {
+        $user_id = (int)$callerUserId;
+    }
+
     $full_name = $input['full_name'] ?? null;
     $name_bn = $input['name_bn'] ?? null;
     $date_of_birth = $input['date_of_birth'] ?? null;
@@ -95,25 +134,27 @@ else if ($action === 'create' && $method === 'POST') {
     $patient_type = $input['patient_type'] ?? 'outdoor';
     $consultant_email = $input['consultant_email'] ?? null;
     $consultant_name = $input['consultant_name'] ?? null;
-    
+
     if (!$user_id || !$full_name) {
-        sendError('user_id and full_name required', 400);
+        sendError('full_name required and authenticated user must be valid', 400);
     }
-    
+
     $query = "INSERT INTO patients (
         user_id, full_name, name_bn, date_of_birth, gender, phone, email, address,
         blood_group, weight, height, allergies, chronic_conditions, past_surgical_history,
         patient_type, consultant_email, consultant_name
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-    
+
     $stmt = $conn->prepare($query);
+    $weightParam = $weight === null ? null : $weight;
+    $heightParam = $height === null ? null : $height;
     $stmt->bind_param(
         'issssssssddssssss',
         $user_id, $full_name, $name_bn, $date_of_birth, $gender, $phone, $email, $address,
-        $blood_group, $weight, $height, $allergies, $chronic_conditions, $past_surgical_history,
+        $blood_group, $weightParam, $heightParam, $allergies, $chronic_conditions, $past_surgical_history,
         $patient_type, $consultant_email, $consultant_name
     );
-    
+
     if ($stmt->execute()) {
         $patient_id = $conn->insert_id;
         sendSuccess(['id' => $patient_id], 'Patient created successfully', 201);
@@ -126,25 +167,40 @@ else if ($action === 'create' && $method === 'POST') {
 // UPDATE PATIENT
 // ============================================
 else if ($action === 'update' && $method === 'PUT') {
-    validateAuth();
-    
+    $auth = validateAuth();
+    $callerRole = $auth['role'] ?? null;
+
     $patient_id = $input['id'] ?? null;
-    
+
     if (!$patient_id) {
         sendError('Patient ID required', 400);
     }
-    
+
+    // Fetch existing to verify ownership
+    $q = "SELECT * FROM patients WHERE id = ?";
+    $s = $conn->prepare($q);
+    $s->bind_param('i', $patient_id);
+    $s->execute();
+    $r = $s->get_result();
+    if ($r->num_rows === 0) sendError('Patient not found', 404);
+    $existing = $r->fetch_assoc();
+
+    // Authorization: only admin/doctor or owner can update
+    if (!in_array($callerRole, ['admin', 'doctor']) && $existing['user_id'] != $auth['user_id']) {
+        sendError('Forbidden', 403);
+    }
+
     // Build dynamic update query
     $updates = [];
     $params = [];
     $types = '';
-    
+
     $allowed_fields = [
         'full_name', 'name_bn', 'date_of_birth', 'gender', 'phone', 'email',
         'address', 'blood_group', 'weight', 'height', 'past_surgical_history',
         'patient_type', 'consultant_email', 'consultant_name'
     ];
-    
+
     foreach ($allowed_fields as $field) {
         if (isset($input[$field])) {
             $updates[] = "$field = ?";
@@ -152,20 +208,20 @@ else if ($action === 'update' && $method === 'PUT') {
             $types .= is_numeric($input[$field]) ? 'd' : 's';
         }
     }
-    
+
     if (empty($updates)) {
         sendError('No fields to update', 400);
     }
-    
+
     $updates[] = 'updated_at = NOW()';
     $params[] = $patient_id;
     $types .= 'i';
-    
+
     $query = "UPDATE patients SET " . implode(', ', $updates) . " WHERE id = ?";
-    
+
     $stmt = $conn->prepare($query);
     $stmt->bind_param($types, ...$params);
-    
+
     if ($stmt->execute()) {
         sendSuccess([], 'Patient updated successfully');
     } else {
@@ -177,18 +233,24 @@ else if ($action === 'update' && $method === 'PUT') {
 // DELETE PATIENT
 // ============================================
 else if ($action === 'delete' && $method === 'DELETE') {
-    validateAuth();
-    
+    $auth = validateAuth();
+    $callerRole = $auth['role'] ?? null;
+
     $patient_id = $input['id'] ?? $_GET['id'] ?? null;
-    
+
     if (!$patient_id) {
         sendError('Patient ID required', 400);
     }
-    
+
+    // Only admin or doctor can delete
+    if (!in_array($callerRole, ['admin', 'doctor'])) {
+        sendError('Forbidden', 403);
+    }
+
     $query = "DELETE FROM patients WHERE id = ?";
     $stmt = $conn->prepare($query);
     $stmt->bind_param('i', $patient_id);
-    
+
     if ($stmt->execute()) {
         sendSuccess([], 'Patient deleted successfully');
     } else {
@@ -200,23 +262,22 @@ else if ($action === 'delete' && $method === 'DELETE') {
 // GET PATIENTS SINCE TIMESTAMP (Sync)
 // ============================================
 else if ($action === 'sync' && $method === 'GET') {
-    validateAuth();
-    
+    $auth = validateAuth();
     $since_timestamp = $_GET['since'] ?? 0;
-    
+
     $query = "SELECT * FROM patients WHERE UNIX_TIMESTAMP(updated_at) >= ? ORDER BY updated_at DESC";
     $stmt = $conn->prepare($query);
     $stmt->bind_param('i', $since_timestamp);
     $stmt->execute();
     $result = $stmt->get_result();
-    
+
     $patients = [];
     while ($row = $result->fetch_assoc()) {
         $row['allergies'] = json_decode($row['allergies'] ?? '[]');
         $row['chronic_conditions'] = json_decode($row['chronic_conditions'] ?? '[]');
         $patients[] = $row;
     }
-    
+
     sendSuccess($patients, 'Synced patients');
 }
 
@@ -224,20 +285,25 @@ else if ($action === 'sync' && $method === 'GET') {
 // ASSIGN CONSULTANT
 // ============================================
 else if ($action === 'assign-consultant' && $method === 'POST') {
-    validateAuth();
-    
+    $auth = validateAuth();
+    $callerRole = $auth['role'] ?? null;
+
     $patient_id = $input['patient_id'] ?? null;
     $consultant_email = $input['consultant_email'] ?? null;
     $consultant_name = $input['consultant_name'] ?? null;
-    
+
     if (!$patient_id || !$consultant_email || !$consultant_name) {
         sendError('patient_id, consultant_email, and consultant_name required', 400);
     }
-    
+
+    if (!in_array($callerRole, ['admin', 'doctor'])) {
+        sendError('Forbidden: insufficient permissions', 403);
+    }
+
     $query = "UPDATE patients SET consultant_email = ?, consultant_name = ?, updated_at = NOW() WHERE id = ?";
     $stmt = $conn->prepare($query);
     $stmt->bind_param('ssi', $consultant_email, $consultant_name, $patient_id);
-    
+
     if ($stmt->execute()) {
         sendSuccess([], 'Consultant assigned successfully');
     } else {
