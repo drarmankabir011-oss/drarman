@@ -24,15 +24,16 @@ $input = json_decode(file_get_contents('php://input'), true);
 // GET ALL VISITS
 // ============================================
 if ($action === 'list' && $method === 'GET') {
-    validateAuth();
-    
+    // allow clinical staff and admin to list all visits
+    $payload = checkPermission(['admin','doctor','consultant_doctor','medical_officer','nurse','registrar','assistant_registrar','staff']);
+
     $query = "SELECT * FROM visits ORDER BY visit_date DESC";
     $result = $conn->query($query);
-    
+
     if (!$result) {
         sendError('Database error: ' . $conn->error, 500);
     }
-    
+
     $visits = $result->fetch_all(MYSQLI_ASSOC);
     sendSuccess($visits, 'Visits retrieved');
 }
@@ -41,24 +42,40 @@ if ($action === 'list' && $method === 'GET') {
 // GET VISIT BY ID
 // ============================================
 else if ($action === 'get' && $method === 'GET') {
-    validateAuth();
+    $payload = validateAuth();
     $visit_id = $_GET['id'] ?? null;
-    
+
     if (!$visit_id) {
         sendError('Visit ID required', 400);
     }
-    
+
     $query = "SELECT * FROM visits WHERE id = ?";
     $stmt = $conn->prepare($query);
     $stmt->bind_param('i', $visit_id);
     $stmt->execute();
     $result = $stmt->get_result();
-    
+
     if ($result->num_rows === 0) {
         sendError('Visit not found', 404);
     }
-    
+
     $visit = $result->fetch_assoc();
+
+    // Authorization: allow if admin/doctor/medical_officer/nurse/consultant, or if the caller owns the patient
+    $allowed = ['admin','doctor','consultant_doctor','medical_officer','nurse','registrar','assistant_registrar','staff'];
+    if (!in_array($payload['role'] ?? '', $allowed)) {
+        // fetch patient owner
+        $pstmt = $conn->prepare("SELECT user_id FROM patients WHERE id = ? LIMIT 1");
+        $pstmt->bind_param('i', $visit['patient_id']);
+        $pstmt->execute();
+        $pres = $pstmt->get_result();
+        $patientOwner = $pres && $row = $pres->fetch_assoc() ? $row['user_id'] : null;
+
+        if ($patientOwner == null || $patientOwner != ($payload['user_id'] ?? null)) {
+            sendError('Forbidden', 403);
+        }
+    }
+
     sendSuccess($visit);
 }
 
@@ -66,19 +83,33 @@ else if ($action === 'get' && $method === 'GET') {
 // GET VISITS BY PATIENT ID
 // ============================================
 else if ($action === 'by-patient' && $method === 'GET') {
-    validateAuth();
+    $payload = validateAuth();
     $patient_id = $_GET['patient_id'] ?? null;
-    
+
     if (!$patient_id) {
         sendError('Patient ID required', 400);
     }
-    
+
+    // Authorization: allow clinical staff or the patient owner
+    $allowed = ['admin','doctor','consultant_doctor','medical_officer','nurse','registrar','assistant_registrar','staff'];
+    if (!in_array($payload['role'] ?? '', $allowed)) {
+        $pstmt = $conn->prepare("SELECT user_id FROM patients WHERE id = ? LIMIT 1");
+        $pstmt->bind_param('i', $patient_id);
+        $pstmt->execute();
+        $pres = $pstmt->get_result();
+        $patientOwner = $pres && $row = $pres->fetch_assoc() ? $row['user_id'] : null;
+
+        if ($patientOwner == null || $patientOwner != ($payload['user_id'] ?? null)) {
+            sendError('Forbidden', 403);
+        }
+    }
+
     $query = "SELECT * FROM visits WHERE patient_id = ? ORDER BY visit_date DESC";
     $stmt = $conn->prepare($query);
     $stmt->bind_param('i', $patient_id);
     $stmt->execute();
     $result = $stmt->get_result();
-    
+
     $visits = $result->fetch_all(MYSQLI_ASSOC);
     sendSuccess($visits, 'Patient visits retrieved');
 }
@@ -87,8 +118,9 @@ else if ($action === 'by-patient' && $method === 'GET') {
 // CREATE VISIT
 // ============================================
 else if ($action === 'create' && $method === 'POST') {
-    validateAuth();
-    
+    // only clinical staff and admin may create visits
+    $payload = checkPermission(['admin','doctor','consultant_doctor','medical_officer','nurse','registrar','assistant_registrar']);
+
     $patient_id = $input['patient_id'] ?? null;
     $visit_date = $input['visit_date'] ?? null;
     $chief_complaint = $input['chief_complaint'] ?? null;
@@ -102,17 +134,17 @@ else if ($action === 'create' && $method === 'POST') {
     $diagnosis = $input['diagnosis'] ?? null;
     $notes = $input['notes'] ?? null;
     $visit_type = $input['visit_type'] ?? 'outdoor';
-    
+
     if (!$patient_id || !$visit_date || !$chief_complaint) {
         sendError('patient_id, visit_date, and chief_complaint required', 400);
     }
-    
+
     $query = "INSERT INTO visits (
         patient_id, visit_date, chief_complaint, history_of_present_illness,
         blood_pressure, pulse, temperature, respiratory_rate, oxygen_saturation,
         physical_examination, diagnosis, notes, visit_type
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-    
+
     $stmt = $conn->prepare($query);
     $stmt->bind_param(
         'isssssssssss',
@@ -120,7 +152,7 @@ else if ($action === 'create' && $method === 'POST') {
         $blood_pressure, $pulse, $temperature, $respiratory_rate, $oxygen_saturation,
         $physical_examination, $diagnosis, $notes, $visit_type
     );
-    
+
     if ($stmt->execute()) {
         $visit_id = $conn->insert_id;
         sendSuccess(['id' => $visit_id], 'Visit created successfully', 201);
@@ -133,24 +165,25 @@ else if ($action === 'create' && $method === 'POST') {
 // UPDATE VISIT
 // ============================================
 else if ($action === 'update' && $method === 'PUT') {
-    validateAuth();
-    
+    // only clinical staff or admin may update visits
+    $payload = checkPermission(['admin','doctor','consultant_doctor','medical_officer','nurse','registrar','assistant_registrar']);
+
     $visit_id = $input['id'] ?? null;
-    
+
     if (!$visit_id) {
         sendError('Visit ID required', 400);
     }
-    
+
     $updates = [];
     $params = [];
     $types = '';
-    
+
     $allowed_fields = [
         'chief_complaint', 'history_of_present_illness', 'blood_pressure', 'pulse',
         'temperature', 'respiratory_rate', 'oxygen_saturation', 'physical_examination',
         'diagnosis', 'notes', 'visit_type'
     ];
-    
+
     foreach ($allowed_fields as $field) {
         if (isset($input[$field])) {
             $updates[] = "$field = ?";
@@ -158,20 +191,20 @@ else if ($action === 'update' && $method === 'PUT') {
             $types .= 's';
         }
     }
-    
+
     if (empty($updates)) {
         sendError('No fields to update', 400);
     }
-    
+
     $updates[] = 'updated_at = NOW()';
     $params[] = $visit_id;
     $types .= 'i';
-    
+
     $query = "UPDATE visits SET " . implode(', ', $updates) . " WHERE id = ?";
-    
+
     $stmt = $conn->prepare($query);
     $stmt->bind_param($types, ...$params);
-    
+
     if ($stmt->execute()) {
         sendSuccess([], 'Visit updated successfully');
     } else {
@@ -183,18 +216,19 @@ else if ($action === 'update' && $method === 'PUT') {
 // DELETE VISIT
 // ============================================
 else if ($action === 'delete' && $method === 'DELETE') {
-    validateAuth();
-    
+    // only admin or doctor may delete visits
+    $payload = checkPermission(['admin','doctor','consultant_doctor']);
+
     $visit_id = $input['id'] ?? $_GET['id'] ?? null;
-    
+
     if (!$visit_id) {
         sendError('Visit ID required', 400);
     }
-    
+
     $query = "DELETE FROM visits WHERE id = ?";
     $stmt = $conn->prepare($query);
     $stmt->bind_param('i', $visit_id);
-    
+
     if ($stmt->execute()) {
         sendSuccess([], 'Visit deleted successfully');
     } else {
@@ -206,16 +240,16 @@ else if ($action === 'delete' && $method === 'DELETE') {
 // GET VISITS SINCE TIMESTAMP (Sync)
 // ============================================
 else if ($action === 'sync' && $method === 'GET') {
-    validateAuth();
-    
+    $payload = checkPermission(['admin','doctor','consultant_doctor','medical_officer','nurse','registrar','assistant_registrar','staff']);
+
     $since_timestamp = $_GET['since'] ?? 0;
-    
+
     $query = "SELECT * FROM visits WHERE UNIX_TIMESTAMP(updated_at) >= ? ORDER BY updated_at DESC";
     $stmt = $conn->prepare($query);
     $stmt->bind_param('i', $since_timestamp);
     $stmt->execute();
     $result = $stmt->get_result();
-    
+
     $visits = $result->fetch_all(MYSQLI_ASSOC);
     sendSuccess($visits, 'Synced visits');
 }
