@@ -15,10 +15,9 @@ $input = json_decode(file_get_contents('php://input'), true);
 
 // Save: requires auth
 if ($action === 'save' && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    // If validateAuth returns or throws, adjust accordingly. Here we call validateAuth() for existing flow.
-    $token = validateAuth();
-    $payload = verifyToken($token);
-    if (!$payload || ($payload['role'] ?? '') !== 'admin') {
+    // validateAuth() now returns decoded payload
+    $payload = validateAuth();
+    if (!isset($payload['role']) || $payload['role'] !== 'admin') {
         http_response_code(403);
         echo json_encode(['error' => 'Only admin can save front page']);
         exit();
