@@ -42,42 +42,88 @@ function sendError($message, $status = 400) {
 }
 
 // Success response helper
-function sendSuccess($data, $message = 'Success') {
-    sendResponse(['success' => true, 'message' => $message, 'data' => $data]);
+function sendSuccess($data, $message = 'Success', $status = 200) {
+    sendResponse(['success' => true, 'message' => $message, 'data' => $data], $status);
 }
 
-// Validate JWT or session token (basic implementation)
+// Auth secret — read from environment when possible
+$AUTH_SECRET = getenv('AUTH_SECRET') ?: 'your-secret-key-change-in-production';
+
+// Token helpers (simple HMAC payload tokens). Consider replacing with a JWT library in production.
+function generateToken($user_id, $email, $role) {
+    global $AUTH_SECRET;
+    $payload = [
+        'user_id' => $user_id,
+        'email' => $email,
+        'role' => $role,
+        'iat' => time(),
+        'exp' => time() + (24 * 60 * 60) // 24 hours
+    ];
+    $encoded = base64_encode(json_encode($payload));
+    $sig = hash_hmac('sha256', $encoded, $AUTH_SECRET);
+    return $encoded . '.' . $sig;
+}
+
+function verifyToken($token) {
+    global $AUTH_SECRET;
+    if (!$token || !is_string($token)) return false;
+    $parts = explode('.', $token);
+    if (count($parts) !== 2) return false;
+    $payloadJson = base64_decode($parts[0]);
+    if ($payloadJson === false) return false;
+    $payload = json_decode($payloadJson, true);
+    if (!is_array($payload)) return false;
+    $signature = hash_hmac('sha256', $parts[0], $AUTH_SECRET);
+    if (!hash_equals($signature, $parts[1])) return false;
+    if (!isset($payload['exp']) || $payload['exp'] < time()) return false;
+    return $payload;
+}
+
+// Validate Authorization header, verify token, and return decoded payload.
 function validateAuth() {
-    // Check if Authorization header exists
     $headers = getallheaders();
-    if (!isset($headers['Authorization'])) {
+    $authHeader = null;
+    if ($headers) {
+        foreach ($headers as $k => $v) {
+            if (strtolower($k) === 'authorization') {
+                $authHeader = $v;
+                break;
+            }
+        }
+    }
+    if (!$authHeader) {
         sendError('Unauthorized: No authorization header', 401);
     }
-    
-    $auth = $headers['Authorization'];
-    if (strpos($auth, 'Bearer ') === 0) {
-        $token = substr($auth, 7);
-        // TODO: Implement JWT validation
-        return $token;
+    if (strpos($authHeader, 'Bearer ') === 0) {
+        $token = substr($authHeader, 7);
+        $payload = verifyToken($token);
+        if (!$payload) {
+            sendError('Unauthorized: Invalid or expired token', 401);
+        }
+        return $payload; // associative array with user_id, email, role
     }
-    
     sendError('Unauthorized: Invalid token format', 401);
 }
 
-// Get current user role from token/session
+// Get current user role from token/session — returns role string or null
 function getUserRole() {
-    // TODO: Extract user role from JWT/session
-    return 'user';  // Default role
+    try {
+        $payload = validateAuth();
+        return $payload['role'] ?? null;
+    } catch (Exception $e) {
+        return null;
+    }
 }
 
-// Check user permissions
-function checkPermission($required_role) {
-    $user_role = getUserRole();
-    $allowed_roles = ['admin', 'doctor', 'patient'];
-    
+// Check user permissions — accepts string or array of allowed roles. Returns payload when allowed.
+function checkPermission($allowed_roles) {
+    if (is_string($allowed_roles)) $allowed_roles = [$allowed_roles];
+    $payload = validateAuth();
+    $user_role = $payload['role'] ?? null;
     if (!in_array($user_role, $allowed_roles)) {
         sendError('Unauthorized: Insufficient permissions', 403);
     }
+    return $payload;
 }
 
 ?>
