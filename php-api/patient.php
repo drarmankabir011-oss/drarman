@@ -24,6 +24,7 @@ $input = json_decode(file_get_contents('php://input'), true);
 // GET ALL PATIENTS
 // ============================================
 if ($action === 'list' && $method === 'GET') {
+    // Only clinical staff & admin can list all; others get their own list
     $auth = validateAuth();
     $callerRole = $auth['role'] ?? null;
 
@@ -50,6 +51,7 @@ if ($action === 'list' && $method === 'GET') {
     }
     
     // admin/doctor: fetch all patients
+    $payload = checkPermission(['admin','doctor']);
     $query = "SELECT * FROM patients ORDER BY created_at DESC";
     $result = $conn->query($query);
     
@@ -111,10 +113,14 @@ else if ($action === 'create' && $method === 'POST') {
     $callerUserId = $auth['user_id'] ?? null;
     $callerRole = $auth['role'] ?? null;
 
-    // Admin may create for another user by supplying user_id
-    if (isset($input['user_id']) && $callerRole === 'admin') {
+    // If user_id is supplied, only admin may create for another user.
+    if (isset($input['user_id'])) {
+        if ($callerRole !== 'admin') {
+            sendError('Forbidden: only admin may create patients for other users', 403);
+        }
         $user_id = (int)$input['user_id'];
     } else {
+        // default: create patient for the calling user
         $user_id = (int)$callerUserId;
     }
 
