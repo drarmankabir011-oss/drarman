@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { saveFrontPageContentWithSync } from "../lib/hybridStorage";
 
 export interface SocialLink {
@@ -67,7 +67,7 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
     heroDescriptionEn:
       "Expert diagnosis, compassionate treatment, and trusted care for every stage of life.",
     heroDescriptionBn:
-      "জীবনের প্রতিটি পর্যায়ে বিশেষজ্ঞ রোগ নির্ণয়, সহানুভূতিশীল চিকিৎসা ও বিশ্বস্ত সেবা।",
+      "জীবনের প্রতিটি পর্যায়ে বিশেষজ্ঞ রোগ নির্ণয়, সহানুভূতিশীল চিকিৎসা ও সেবা।",
     cta1Label: "Book Appointment",
     cta2Label: "Emergency",
   },
@@ -78,7 +78,7 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
     descriptionEn:
       "Comprehensive patient management and medical education serving patients and students across Bangladesh.",
     descriptionBn:
-      "বাংলাদেশ জুড়ে রোগী ও শিক্ষার্থীদের জন্য পূর্ণাঙ্গ রোগী ব্যবস্থাপনা ও চিকিৎসা শিক্ষা।",
+      "বাংলাদেশ জুড়ে রোগী ও শিক্ষার্থীদের জন্য পূর্ণাঙ্গ রোগী ব্যবস্থাপনা ও শিক্ষা।",
     yearsExperience: 10,
     patientCount: "500+",
     doctorCount: 2,
@@ -179,6 +179,38 @@ function resolveActor(): unknown | null {
 
 export function useSiteConfig() {
   const [config, setConfig] = useState<SiteConfig>(loadConfig);
+
+  // Bootstrap from server-saved front page (cPanel)
+  useEffect(() => {
+    async function loadServerFrontpage() {
+      if (!navigator.onLine) return;
+      try {
+        const res = await fetch("/php-api/frontpage.php?action=get", {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+        });
+        if (!res.ok) return;
+        const serverJson = await res.json();
+        if (!serverJson) return;
+
+        if (serverJson.siteConfig) {
+          localStorage.setItem("siteConfig", JSON.stringify(serverJson.siteConfig));
+          setConfig(serverJson.siteConfig as SiteConfig);
+        } else {
+          localStorage.setItem("siteConfig", JSON.stringify(serverJson));
+          setConfig(serverJson as SiteConfig);
+        }
+
+        if (serverJson.doctorContentOverrides) {
+          localStorage.setItem("doctorContentOverrides", JSON.stringify(serverJson.doctorContentOverrides));
+        }
+      } catch (err) {
+        // fail silently — keep local copy
+      }
+    }
+
+    void loadServerFrontpage();
+  }, []);
 
   const updateHero = useCallback((hero: Partial<HeroSection>) => {
     setConfig((prev) => {
