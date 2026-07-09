@@ -27,7 +27,8 @@ if ($action === 'register' && $method === 'POST') {
     $email = $input['email'] ?? null;
     $password = $input['password'] ?? null;
     $full_name = $input['full_name'] ?? null;
-    $role = $input['role'] ?? 'patient';
+    // Force new registrations to 'patient' — admin accounts must be created by an existing admin
+    $role = 'patient';
 
     // Validation
     if (!$email || !$password || !$full_name) {
@@ -64,7 +65,7 @@ if ($action === 'register' && $method === 'POST') {
     if ($stmt->execute()) {
         $user_id = $conn->insert_id;
         
-        // Create JWT token (simple implementation)
+        // Create token using centralized helper in config.php
         $token = generateToken($user_id, $email, $role);
         
         sendSuccess([
@@ -108,7 +109,7 @@ else if ($action === 'login' && $method === 'POST') {
         sendError('Invalid email or password', 401);
     }
 
-    // Generate JWT token
+    // Generate token using centralized helper in config.php
     $token = generateToken($user['id'], $user['email'], $user['role']);
 
     sendSuccess([
@@ -124,8 +125,8 @@ else if ($action === 'login' && $method === 'POST') {
 // GET CURRENT USER - Get logged-in user info
 // ============================================
 else if ($action === 'current-user' && $method === 'GET') {
-    $token = validateAuth();
-    $user_data = verifyToken($token);
+    // validateAuth() now returns decoded payload
+    $user_data = validateAuth();
 
     if (!$user_data) {
         sendError('Invalid token', 401);
@@ -146,8 +147,7 @@ else if ($action === 'current-user' && $method === 'GET') {
 // UPDATE PROFILE
 // ============================================
 else if ($action === 'update-profile' && $method === 'POST') {
-    $token = validateAuth();
-    $user_data = verifyToken($token);
+    $user_data = validateAuth();
 
     if (!$user_data) {
         sendError('Invalid token', 401);
@@ -173,8 +173,7 @@ else if ($action === 'update-profile' && $method === 'POST') {
 // CHANGE PASSWORD
 // ============================================
 else if ($action === 'change-password' && $method === 'POST') {
-    $token = validateAuth();
-    $user_data = verifyToken($token);
+    $user_data = validateAuth();
 
     if (!$user_data) {
         sendError('Invalid token', 401);
@@ -214,47 +213,3 @@ else if ($action === 'change-password' && $method === 'POST') {
 else {
     sendError('Invalid action or method', 400);
 }
-
-// ============================================
-// Helper Functions
-// ============================================
-
-function generateToken($user_id, $email, $role) {
-    // Simple JWT-like token (implement proper JWT library in production)
-    $payload = [
-        'user_id' => $user_id,
-        'email' => $email,
-        'role' => $role,
-        'iat' => time(),
-        'exp' => time() + (24 * 60 * 60) // 24 hours
-    ];
-    
-    // Use a secret key stored in environment or config
-    $secret = 'your-secret-key-change-in-production';
-    return base64_encode(json_encode($payload)) . '.' . hash_hmac('sha256', base64_encode(json_encode($payload)), $secret);
-}
-
-function verifyToken($token) {
-    // Simple JWT-like token verification
-    $secret = 'your-secret-key-change-in-production';
-    $parts = explode('.', $token);
-    
-    if (count($parts) !== 2) {
-        return false;
-    }
-    
-    $payload = json_decode(base64_decode($parts[0]), true);
-    $signature = hash_hmac('sha256', $parts[0], $secret);
-    
-    if ($parts[1] !== $signature) {
-        return false;
-    }
-    
-    if ($payload['exp'] < time()) {
-        return false;
-    }
-    
-    return $payload;
-}
-
-?>
